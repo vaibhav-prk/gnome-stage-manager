@@ -408,6 +408,7 @@ const DEFAULTS = {
     'sidebar-reserve-space': false,
     'auto-hide-delay': 800,
     'edge-trigger-width': 4,
+    'edge-trigger-delay': 250,
     'show-app-icons': true,
     'sidebar-mode': 'groups',
     'card-base-scale': 70,
@@ -461,7 +462,23 @@ export function installGlobals() {
         }),
         display: Object.assign(display, {
             get_focus_window: () => focusedWindow,
-            get_monitor_in_fullscreen: () => false,
+            // Strict on purpose: the real binding takes a gint, so a monitor
+            // object built without `index` throws instead of silently reporting
+            // "not fullscreen".
+            get_monitor_in_fullscreen: idx => {
+                if (!Number.isInteger(idx))
+                    throw new TypeError(`get_monitor_in_fullscreen expects an integer index, got ${idx}`);
+                return false;
+            },
+            // _getMon() reads geometry from the compositor, not layoutManager;
+            // mirror the same single monitor so both paths agree.
+            get_primary_monitor: () => Main.layoutManager.primaryMonitor.index,
+            get_n_monitors: () => Main.layoutManager.monitors.length,
+            get_monitor_geometry: idx => {
+                const mon = Main.layoutManager.monitors[idx];
+                if (!mon) throw new RangeError(`no monitor at index ${idx}`);
+                return { x: mon.x, y: mon.y, width: mon.width, height: mon.height };
+            },
         }),
         stage: Object.assign(stage, {
             // Tests drive this by setting stage._actorAtPos directly — there's

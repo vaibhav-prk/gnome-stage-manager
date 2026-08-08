@@ -39,41 +39,25 @@ const CARD_HOVER_OPACITY = 255;   // fully opaque at the centre of the bell curv
 const MAX_SNAPSHOTS = 8;
 const KEYBIND_NAME = 'toggle-sidebar';
 const APP_DRAG_THRESHOLD = 18;    // logical px — past this, a press+release is a drag, not a click
+// Last-resort geometry when the compositor reports no monitor at all (see _getMon).
+const MON_FALLBACK = { x: 0, y: 0, width: 1920, height: 1080, index: 0 };
 
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+/** Primary monitor, from Meta.Display — Main.layoutManager.primaryMonitor is
+ *  empty under gnome-remote-desktop (issue #8). Always carries `index`, which
+ *  _fullscreen() needs. Never returns null. */
 function _getMon() {
     const display = global.display;
-    
-    // 1. Fallback if the display server isn't fully ready
-    if (!display) {
-        return { x: 0, y: 0, width: 1920, height: 1080 }; // Sensible headless default
-    }
+    const primary = display.get_primary_monitor();
+    const index = primary >= 0 ? primary : 0;   // -1 before the config is read
 
-    // 2. Fetch the current index of the primary monitor directly from Mutter
-    const primaryIndex = display.get_primary_monitor();
-    
-    // 3. Fallback to 0 if primaryIndex is invalid/negative
-    const safeIndex = primaryIndex >= 0 ? primaryIndex : 0;
-    
-    // 4. Extract MtkRectangle/MetaRectangle straight from the compositor
-    if (display.get_n_monitors() > safeIndex) {
-        const rect = display.get_monitor_geometry(safeIndex);
-        return {
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height
-        };
+    if (display.get_n_monitors() > index) {
+        const rect = display.get_monitor_geometry(index);
+        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height, index };
     }
-    
-    // 5. Hard fallback to layoutManager elements if layoutManager has populated late
-    if (Main.layoutManager && Main.layoutManager.primaryMonitor) {
-        return Main.layoutManager.primaryMonitor;
-    }
-
-    return { x: 0, y: 0, width: 1024, height: 768 };
+    return Main.layoutManager.primaryMonitor ?? MON_FALLBACK;
 }
 
 
@@ -286,6 +270,7 @@ class StageSidebar {
         this._refreshTimer = null;
         this._hideTimer = null;
         this._swapTimer = null;
+        this._edgeTimer = null;          // pointer-dwell before an edge reveal
         this._visible = false;
         this._hovered = false;
         this._hoveredIdx = -1;
@@ -347,6 +332,8 @@ class StageSidebar {
     get _SLIDE_MS() { return this._settings.get_int('animation-duration'); }
     get _HIDE_DELAY_MS() { return this._settings.get_int('auto-hide-delay'); }
     get _EDGE_W() { return this._settings.get_int('edge-trigger-width') * this._scaleFactor; }
+    /** Pointer dwell before an edge reveal. A duration, so it is NOT scaled. */
+    get _EDGE_DELAY_MS() { return this._settings.get_int('edge-trigger-delay'); }
     get _BASE_SCALE() { return this._settings.get_int('card-base-scale') / 100.0; }
     get _PERSP_ANGLE() { return this._settings.get_int('perspective-angle'); }
     get _POS() { return this._settings.get_string('stack-panel-position'); }
@@ -394,6 +381,7 @@ class StageSidebar {
         this._killHideTimer();
         this._killHoverTimer();
         this._killSwapTimer();
+        this._killEdgeTimer();
         // Anything the named fields above did not cover.
         this._timers.splice(0).forEach(id => GLib.source_remove(id));
         // Keybinding before signals so the wm doesn't keep a stale handler.
@@ -455,8 +443,25 @@ class StageSidebar {
         this._edge.set_position(this._edgeX(mon), mon.y + topH);
         Main.layoutManager.addChrome(this._edge, { trackFullscreen: false });
         this._sig(this._edge, 'enter-event', () => {
-            if (!this._fullscreen()) this._show();
+            if (this._fullscreen()) return;
+            const delay = this._EDGE_DELAY_MS;
+            if (delay <= 0) {
+                this._show();
+                return;
+            }
+            this._killEdgeTimer();
+            this._edgeTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+                this._untrackTimer(this._edgeTimer); this._edgeTimer = null;
+                // Re-checked: the dwell is long enough for a window to have
+                // gone fullscreen since the pointer arrived.
+                if (!this._fullscreen()) this._show();
+                return GLib.SOURCE_REMOVE;
+            });
+            this._timers.push(this._edgeTimer);
         });
+        // Pointer left before the dwell elapsed — it was a brush-past, not an
+        // intent to open (issue #2: apps with their own left-edge hover UI).
+        this._sig(this._edge, 'leave-event', () => this._killEdgeTimer());
 
         // reactive MUST stay false (here and on the scroll view) — a reactive
         // full-height panel would swallow every click/scroll in its column.
@@ -1108,10 +1113,7 @@ class StageSidebar {
     // ── Fullscreen ──
 
     _fullscreen() {
-        // primaryMonitor is briefly null while monitors are being reconfigured.
-        const mon = _getMon();
-        if (!mon) return false;
-        return global.display.get_monitor_in_fullscreen(mon.index);
+        return global.display.get_monitor_in_fullscreen(_getMon().index);
     }
 
     _onFullscreen() {
@@ -1122,8 +1124,7 @@ class StageSidebar {
                 if (this._panel) {
                     this._panel.remove_all_transitions();
                     this._panel.set_position(
-                        this._panelHiddenX(_getMon(), this._panel.y)
-                    );
+                        this._panelHiddenX(_getMon()), this._panel.y);
                 }
             }
             this._syncEdge();
@@ -2077,6 +2078,10 @@ class StageSidebar {
         if (this._swapTimer) { GLib.source_remove(this._swapTimer); this._untrackTimer(this._swapTimer); this._swapTimer = null; }
     }
 
+    _killEdgeTimer() {
+        if (this._edgeTimer) { GLib.source_remove(this._edgeTimer); this._untrackTimer(this._edgeTimer); this._edgeTimer = null; }
+    }
+
     // ── Show-on-empty-workspace ──────────────────────────────────────────
 
     /**
@@ -2170,6 +2175,7 @@ class ArcSidebar {
         this._scrollTimer = null;
         this._refreshTimer = null;
         this._dragPollTimer = null;
+        this._edgeTimer = null;          // pointer-dwell before an edge reveal
 
         this._groups = [];
         this._offset = 0;
@@ -2227,6 +2233,7 @@ class ArcSidebar {
         this._killScrollTimer();
         this._killPersistTimer();
         this._killRefreshTimer();
+        this._killEdgeTimer();
         this._killCardTimers();
         // Anything the named fields above did not cover.
         this._timers.splice(0).forEach(id => GLib.source_remove(id));
@@ -2267,6 +2274,7 @@ class ArcSidebar {
     _killPersistTimer() { if (this._persistTimer) { GLib.source_remove(this._persistTimer); this._untrackTimer(this._persistTimer); this._persistTimer = null; } }
     _killRefreshTimer() { if (this._refreshTimer) { GLib.source_remove(this._refreshTimer); this._untrackTimer(this._refreshTimer); this._refreshTimer = null; } }
     _killDragPollTimer() { if (this._dragPollTimer) { GLib.source_remove(this._dragPollTimer); this._untrackTimer(this._dragPollTimer); this._dragPollTimer = null; } }
+    _killEdgeTimer() { if (this._edgeTimer) { GLib.source_remove(this._edgeTimer); this._untrackTimer(this._edgeTimer); this._edgeTimer = null; } }
 
     _killCardTimers() {
         this._containers.forEach(c => this._killGridTimers(c._grid));
@@ -2291,7 +2299,7 @@ class ArcSidebar {
 
     // ── Filled in by later tasks ──
 
-    _pickMonitor() { return _getMon() }
+    _pickMonitor() { return _getMon(); }
 
     _loadMergeMap() {
         const raw = this._settings.get_string('arc-merge-map');
@@ -2415,6 +2423,8 @@ class ArcSidebar {
     }
 
     get _EDGE_W() { return this._settings.get_int('edge-trigger-width') * this._scaleFactor; }
+    /** Pointer dwell before an edge reveal. A duration, so it is NOT scaled. */
+    get _EDGE_DELAY_MS() { return this._settings.get_int('edge-trigger-delay'); }
 
     _computeGeo() {
         const mon = this._monitor;
@@ -2669,7 +2679,23 @@ class ArcSidebar {
         this._edge.set_position(geo.edgeX, geo.edgeY);
         Main.layoutManager.addChrome(this._edge, { trackFullscreen: false });
 
-        this._sig(this._edge, 'enter-event', () => { if (!this._isVisible) this._showPanel(); });
+        // Same dwell as StageSidebar — see the enter-event there and issue #2.
+        this._sig(this._edge, 'enter-event', () => {
+            if (this._isVisible) return;
+            const delay = this._EDGE_DELAY_MS;
+            if (delay <= 0) {
+                this._showPanel();
+                return;
+            }
+            this._killEdgeTimer();
+            this._edgeTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+                this._untrackTimer(this._edgeTimer); this._edgeTimer = null;
+                if (!this._isVisible) this._showPanel();
+                return GLib.SOURCE_REMOVE;
+            });
+            this._timers.push(this._edgeTimer);
+        });
+        this._sig(this._edge, 'leave-event', () => this._killEdgeTimer());
         this._sig(this._panel, 'enter-event', () => { if (!this._drag) this._cancelHide(); });
         this._sig(this._panel, 'leave-event', () => { if (this._isVisible && !this._drag) this._startHide(); });
         this._sig(this._panel, 'scroll-event', (_a, event) => { this._handleScroll(event); return Clutter.EVENT_STOP; });

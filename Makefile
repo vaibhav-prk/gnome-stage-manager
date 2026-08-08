@@ -1,5 +1,5 @@
 UUID = stage-manager@gnome-stage-manager
-VERSION = 2.0.2
+VERSION = 2.0.3
 EXTENSION_DIR = $(HOME)/.local/share/gnome-shell/extensions/$(UUID)
 SRC_DIR = src
 SCHEMAS_DIR = $(SRC_DIR)/schemas
@@ -19,14 +19,14 @@ build: schemas
 
 # Install to local GNOME Shell extensions directory
 install: build
-	@mkdir -p $(EXTENSION_DIR)
-	@cp -r $(SRC_DIR)/* $(EXTENSION_DIR)/
+	@mkdir -p "$(EXTENSION_DIR)"
+	@cp -r $(SRC_DIR)/* "$(EXTENSION_DIR)/"
 	@echo "Extension installed to $(EXTENSION_DIR)"
 	@echo "Restart GNOME Shell (Alt+F2, 'r', Enter on X11) or log out/in on Wayland."
 
 # Uninstall the extension
 uninstall:
-	@rm -rf $(EXTENSION_DIR)
+	@rm -rf "$(EXTENSION_DIR)"
 	@echo "Extension uninstalled."
 
 # Create a distributable zip for GNOME Extensions Store (extensions.gnome.org).
@@ -77,7 +77,7 @@ lint:
 
 # Restart GNOME Shell (X11 only)
 restart:
-	@if [ "$$XDG_SESSION_TYPE" = "x11" ]; then \
+	@if [ "$${XDG_SESSION_TYPE:-}" = "x11" ]; then \
 		busctl --user call org.gnome.Shell /org/gnome/Shell org.gnome.Shell Eval s 'Meta.restart("Restarting…")'; \
 	else \
 		echo "On Wayland, please log out and log back in to reload extensions."; \

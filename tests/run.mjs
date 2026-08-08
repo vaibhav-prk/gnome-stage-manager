@@ -323,6 +323,76 @@ test('#4 the edge trigger is hidden while the sidebar is on screen', () => {
     assert.equal(sidebar._edge.visible, true, 'edge strip must be live once hidden');
 });
 
+/* ═══ #2 — edge dwell: brushing past must not open the sidebar ═══════ */
+
+/** Build far enough to get a wired, reactive _edge, with _show() recorded
+ *  rather than animated. */
+function edgeSidebar(delay) {
+    wsm.reset(1);
+    const sidebar = makeSidebar(makeSettings({ 'edge-trigger-delay': delay }));
+    sidebar._build();
+    sidebar._fullscreen = () => false;
+    sidebar._shown = 0;
+    sidebar._show = () => { sidebar._shown++; };
+    return sidebar;
+}
+
+test('#2 resting on the edge for the full dwell reveals the sidebar', () => {
+    const sidebar = edgeSidebar(250);
+    sidebar._edge.emit('enter-event');
+    assert.equal(sidebar._shown, 0, 'must not reveal before the dwell elapses');
+    clock.advance(250);
+    assert.equal(sidebar._shown, 1, 'a deliberate dwell must reveal');
+});
+
+test('#2 brushing past the edge cancels the pending reveal', () => {
+    const sidebar = edgeSidebar(250);
+    sidebar._edge.emit('enter-event');
+    assert.ok(sidebar._edgeTimer, 'enter must arm the dwell timer');
+    // Pointer moves on to the app's own left-edge UI before the dwell is up.
+    sidebar._edge.emit('leave-event');
+    assert.equal(sidebar._edgeTimer, null, 'leave must disarm the dwell timer');
+    clock.advance(1000);
+    assert.equal(sidebar._shown, 0, 'a brush-past must never reveal the sidebar');
+});
+
+test('#2 a delay of 0 keeps the original instant reveal, with no timer', () => {
+    const sidebar = edgeSidebar(0);
+    sidebar._edge.emit('enter-event');
+    assert.equal(sidebar._shown, 1, 'delay 0 must reveal synchronously');
+    assert.equal(sidebar._edgeTimer, null, 'delay 0 must not arm a timer at all');
+});
+
+test('#2 re-entering the edge re-arms rather than stacking dwell timers', () => {
+    const sidebar = edgeSidebar(250);
+    sidebar._edge.emit('enter-event');
+    const first = sidebar._edgeTimer;
+    sidebar._edge.emit('enter-event');
+    assert.notEqual(sidebar._edgeTimer, first, 'second enter must arm a fresh timer');
+    assert.equal(sidebar._timers.filter(id => id === first).length, 0,
+        'the superseded timer must be untracked (EGO-L-007)');
+    clock.advance(250);
+    assert.equal(sidebar._shown, 1, 'only one reveal, not one per enter');
+});
+
+test('#2 the dwell timer is tracked in _timers and cleared by disable()', () => {
+    const sidebar = edgeSidebar(250);
+    sidebar._edge.emit('enter-event');
+    assert.ok(sidebar._timers.includes(sidebar._edgeTimer),
+        'every timeout id must live in this._timers (EGO round 4)');
+    sidebar.disable();
+    assert.equal(sidebar._edgeTimer, null, 'disable() must clear the dwell timer');
+    assert.equal(sidebar._timers.length, 0, 'disable() must drain the timer array');
+});
+
+test('#2 a window going fullscreen during the dwell suppresses the reveal', () => {
+    const sidebar = edgeSidebar(250);
+    sidebar._edge.emit('enter-event');
+    sidebar._fullscreen = () => true;
+    clock.advance(250);
+    assert.equal(sidebar._shown, 0, 'the fullscreen check must be re-run when the timer fires');
+});
+
 /* ═══ #17 — thumbnails keep aspect ratio and drop the CSD shadow ═════ */
 
 test('#17 the whole window is shown, scaled to fit and never cropped', () => {
@@ -1886,6 +1956,48 @@ test('_panel is not clip_to_allocation — cards beyond relIdx=1 legitimately ex
     arc._buildUI();
     assert.equal(arc._panel.clip_to_allocation, false,
         'clipping the panel to a one-card-wide box hides cards the angle cull already decided to show');
+    arc._destroyUI();
+});
+
+/* ═══ ArcSidebar — the same edge dwell as the stack layout (#2) ════════ */
+
+function arcEdgeSidebar(delay) {
+    const arc = new ArcSidebar(makeSettings({ 'edge-trigger-delay': delay }));
+    arc._scaleFactor = 1;
+    arc._monitor = Main.layoutManager.primaryMonitor;
+    arc._loadMergeMap(); arc._loadOrderMap(); arc._loadConfig();
+    arc._buildUI();
+    arc._shown = 0;
+    arc._showPanel = () => { arc._shown++; };
+    return arc;
+}
+
+test('arc: resting on the edge for the full dwell reveals the panel', () => {
+    const arc = arcEdgeSidebar(250);
+    arc._edge.emit('enter-event');
+    assert.equal(arc._shown, 0, 'must not reveal before the dwell elapses');
+    clock.advance(250);
+    assert.equal(arc._shown, 1);
+    arc._destroyUI();
+});
+
+test('arc: brushing past the edge cancels the pending reveal', () => {
+    const arc = arcEdgeSidebar(250);
+    arc._edge.emit('enter-event');
+    assert.ok(arc._timers.includes(arc._edgeTimer),
+        'the arc dwell timer must be tracked in _timers too');
+    arc._edge.emit('leave-event');
+    assert.equal(arc._edgeTimer, null);
+    clock.advance(1000);
+    assert.equal(arc._shown, 0, 'a brush-past must never reveal the arc panel');
+    arc._destroyUI();
+});
+
+test('arc: a delay of 0 keeps the original instant reveal', () => {
+    const arc = arcEdgeSidebar(0);
+    arc._edge.emit('enter-event');
+    assert.equal(arc._shown, 1);
+    assert.equal(arc._edgeTimer, null, 'delay 0 must not arm a timer');
     arc._destroyUI();
 });
 
